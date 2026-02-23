@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nia-voice-mac"
+version = "1.0.0"
+description = "Nia Voice Mac — lightweight terminal thin client for Nia Hub"
+requires-python = ">=3.10"
+dependencies = [
+    "nia-voice-core>=0.3.0",
+    "python-dotenv>=1.0",
+]
+
+[project.scripts]
+nia-mac = "nia_voice_mac.main:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["nia_voice_mac*"]
