@@ -54,8 +54,9 @@ def _load_env() -> str:
 _ENV_PATH = _load_env()
 
 import nia_voice_core.config as nia_config  # noqa: E402 — must load after dotenv
-from nia_voice_core.hub import NiaHubClient  # noqa: E402
-from nia_voice_core.mic import MicCapture   # noqa: E402
+from nia_voice_core.hub import NiaHubClient        # noqa: E402
+from nia_voice_core.mic import MicCapture          # noqa: E402
+from nia_voice_core.wakeword import OpenWakeWordEngine  # noqa: E402
 
 # ── Terminal colours ──────────────────────────────────────────────────────────
 
@@ -114,13 +115,15 @@ class NiaMacClient:
     any Raspberry Pi hardware.
     """
 
-    def __init__(self, text_mode: bool = False):
+    def __init__(self, text_mode: bool = False, wake_model: str | None = None):
         self._hub         = NiaHubClient()
         self._mic         = MicCapture()           # sounddevice / CoreAudio
         self._session_id  = uuid.uuid4().hex[:12]  # per-conversation context
         self._processing  = False
         self._running     = False
         self._text_mode   = text_mode
+        self._wake_model  = wake_model             # openWakeWord model name, or None
+        self._wake_engine: OpenWakeWordEngine | None = None
         self._player_cmd  = _find_player()
 
     # ── Hub setup ─────────────────────────────────────────────────────────────
@@ -156,6 +159,22 @@ class NiaMacClient:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+
+    # ── Wake word ─────────────────────────────────────────────────────────────
+
+    def _on_wake_detected(self):
+        """Called by OpenWakeWordEngine when the wake word fires."""
+        if self._processing:
+            # Already busy — resume listening immediately
+            if self._wake_engine:
+                self._wake_engine.resume()
+            return
+        # Run voice pipeline in a thread; engine stays paused until done
+        def _run():
+            self._run_voice()
+            if self._wake_engine:
+                self._wake_engine.resume()
+        threading.Thread(target=_run, daemon=True).start()
 
     # ── Voice pipeline ────────────────────────────────────────────────────────
 
@@ -261,6 +280,11 @@ class NiaMacClient:
     def _prompt(self):
         if self._text_mode:
             print(f"  {_DIM}> {_R}", end="", flush=True)
+        elif self._wake_engine:
+            print(
+                f"  {_DIM}Say '{self._wake_model}' to speak  "
+                f"[Enter] manual  [r] reset  [q] quit{_R}"
+            )
         else:
             print(
                 f"  {_DIM}[Enter] speak  "
@@ -303,8 +327,22 @@ class NiaMacClient:
             print(f"\n  {_Y}⚠  No MP3 player found — audio won't play."
                   f" Install ffmpeg: brew install ffmpeg{_R}")
 
+        # Start wake word engine if requested
+        if self._wake_model and not self._text_mode:
+            self._wake_engine = OpenWakeWordEngine(
+                on_wake=self._on_wake_detected,
+                model=self._wake_model,
+            )
+            if not self._wake_engine.start():
+                self._wake_engine = None
+
         _hr()
-        mode = "text" if self._text_mode else "voice"
+        if self._wake_engine:
+            mode = f"wake:{self._wake_model}"
+        elif self._text_mode:
+            mode = "text"
+        else:
+            mode = "voice"
         cert = "✓ cert pinned" if nia_config.NIA_HUB_CERT else "unverified TLS"
         print(f"  {_G}Ready!{_R}  mode={mode}  session={self._session_id[:8]}  {_DIM}({cert}){_R}")
         _hr()
@@ -371,6 +409,9 @@ class NiaMacClient:
 
     def stop(self):
         self._running = False
+        if self._wake_engine:
+            self._wake_engine.stop()
+            self._wake_engine = None
         print(f"\n  {_DIM}Goodbye!{_R}")
 
 
@@ -398,6 +439,13 @@ def main():
         "--cert", metavar="PATH",
         help="Path to hub TLS cert PEM for verification (overrides NIA_HUB_CERT)",
     )
+    parser.add_argument(
+        "--wake", metavar="MODEL", nargs="?", const="hey_jarvis",
+        help="Enable wake word mode using openWakeWord. "
+             "MODEL defaults to 'hey_jarvis'. "
+             "Other options: alexa, hey_mycroft, hey_rhasspy. "
+             "Requires: pip install openwakeword",
+    )
     args = parser.parse_args()
 
     if args.hub:
@@ -410,7 +458,7 @@ def main():
     # Suppress sounddevice's PortAudio banner on macOS
     os.environ.setdefault("PORTAUDIO_HOSTAPI", "CoreAudio")
 
-    client = NiaMacClient(text_mode=args.text)
+    client = NiaMacClient(text_mode=args.text, wake_model=args.wake)
     client.start()
 
 
