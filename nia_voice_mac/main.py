@@ -169,8 +169,15 @@ class NiaMacClient:
             if self._wake_engine:
                 self._wake_engine.resume()
             return
-        # Run voice pipeline in a thread; engine stays paused until done
         def _run():
+            # Play a short beep so the user knows to speak their command
+            try:
+                subprocess.run(
+                    ["afplay", "/System/Library/Sounds/Tink.aiff"],
+                    capture_output=True, timeout=1,
+                )
+            except Exception:
+                pass
             self._run_voice()
             if self._wake_engine:
                 self._wake_engine.resume()
