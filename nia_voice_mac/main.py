@@ -162,15 +162,25 @@ class NiaMacClient:
 
     # ── Wake word ─────────────────────────────────────────────────────────────
 
+    _FOLLOW_UP_TIMEOUT = 12  # seconds of silence before returning to wake word
+
+    _GOODBYE = {
+        "goodbye", "good bye", "bye", "bye bye",
+        "that's all", "that's it", "stop listening",
+        "never mind", "nevermind", "cancel",
+    }
+
+    def _is_goodbye(self, text: str) -> bool:
+        lower = text.lower()
+        return any(p in lower for p in self._GOODBYE)
+
     def _on_wake_detected(self):
         """Called by OpenWakeWordEngine when the wake word fires."""
         if self._processing:
-            # Already busy — resume listening immediately
             if self._wake_engine:
                 self._wake_engine.resume()
             return
         def _run():
-            # Play a short beep so the user knows to speak their command
             try:
                 subprocess.run(
                     ["afplay", "/System/Library/Sounds/Tink.aiff"],
@@ -178,10 +188,62 @@ class NiaMacClient:
                 )
             except Exception:
                 pass
-            self._run_voice()
+            self._run_conversation()
             if self._wake_engine:
                 self._wake_engine.resume()
         threading.Thread(target=_run, daemon=True).start()
+
+    def _run_conversation(self):
+        """First turn + follow-up loop on the same session.
+
+        Keeps listening after each response until FOLLOW_UP_TIMEOUT seconds
+        of silence, a goodbye phrase, or an error.
+        """
+        self._processing = True
+        try:
+            # ── First turn ────────────────────────────────────────────────
+            _status("🎙", _G, "Listening… (speak now, stops on silence)")
+            wav = self._mic.record(auto_stop=True)
+            if len(wav) < 2500:
+                _status("💤", _DIM, "Nothing captured")
+                return
+
+            transcript, reply = self._run_pipeline(wav)
+            if not transcript:
+                return
+            if self._is_goodbye(transcript) or self._is_goodbye(reply):
+                print(f"  {_DIM}Conversation ended.{_R}\n")
+                return
+
+            # ── Follow-up turns ───────────────────────────────────────────
+            deadline = time.monotonic() + self._FOLLOW_UP_TIMEOUT
+            while time.monotonic() < deadline:
+                remaining = int(deadline - time.monotonic())
+                _status("💬", _G, f"Still listening… ({remaining}s to exit)")
+
+                wav = self._mic.record(auto_stop=True)
+                if len(wav) < 2500:
+                    continue  # silence chunk — let the timer run down
+
+                transcript, reply = self._run_pipeline(wav)
+                if not transcript:
+                    continue
+
+                deadline = time.monotonic() + self._FOLLOW_UP_TIMEOUT  # reset
+                if self._is_goodbye(transcript) or self._is_goodbye(reply):
+                    print(f"  {_DIM}Conversation ended.{_R}\n")
+                    break
+
+            _status("😴", _DIM, "Back to wake word…")
+            print()
+
+        except Exception as e:
+            _status("❌", _RED, f"Error: {e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            self._processing = False
+            self._prompt()
 
     # ── Voice pipeline ────────────────────────────────────────────────────────
 
@@ -256,6 +318,7 @@ class NiaMacClient:
         else:
             _status("💤", _DIM, "Nothing transcribed (silence?)")
         print()
+        return transcript, reply
 
     # ── Text pipeline (--text mode) ───────────────────────────────────────────
 
